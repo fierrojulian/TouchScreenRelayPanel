@@ -40,13 +40,13 @@ Night_Trail_State = 0
 def Fog_Lights_Callback(): # Fog Lights Callback, turns ON and OFF the Fog Lights relay
     global Fog_Lights_State, Fog_Lights
     if Fog_Lights_State == 0: #If the Fog Lights are OFF and the button is pressed, the Fog Lights turn ON
-        Fog_Lights_State = 1
-        Fog_Lights.image = path + 'Fog_Lights_On.png'
-        ser.write(b'0\n')
+        Fog_Lights_State = 1 # Changes the state of the Fog lights to track if it is on 
+        Fog_Lights.image = path + 'Fog_Lights_On.png' # Changes the image on the touch screen when pressed
+        ser.write(b'0\n') # Sends a '0' to the arduino over serial to turn on the relay
     else: #If the Fog Lights are ON and the button is pressed, the Figh Lights turns OFF
-        Fog_Lights_State = 0
-        Fog_Lights.image = path + 'Fog_Lights_Off.png'
-        ser.write(b'1\n')
+        Fog_Lights_State = 0 # Changes the state of the Fog,ights to track if it is off
+        Fog_Lights.image = path + 'Fog_Lights_Off.png' # Changes the image on the touch screen when pressed
+        ser.write(b'1\n') # Sends a '1' to the arduino over serial to turn off the relay
 
 def Light_Bar_Callback(): #Light Barr Callback, tusn ON and OFF the Light Bar relay
     global Light_Bar_State, Light_Bar
