@@ -1095,7 +1095,7 @@ def screen_brightness(value):
     value = slider.value
     subprocess.run(["sudo", "rpi-backlight", "--set-brightness", str(value)])
 
-app = App(title="Keypad example", width=800, height=480, layout="grid")
+app = App(title="Touch Screen Relay Panel", width=800, height=480, layout="grid")
 app.bg='black'
 Fog_Lights = PushButton(app, command=Fog_Lights_Callback, grid=[0,0], align='left', image = path + 'Fog_Lights_Off.png')
 Light_Bar = PushButton(app, command=Light_Bar_Callback, grid=[1,0], align='left',image = path + 'Light_Bar_Off.png')
