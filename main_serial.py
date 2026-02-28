@@ -1,1492 +1,941 @@
-from guizero import App, PushButton, Slider, Text
-from PIL import Image
-from rpi_backlight import Backlight as bl
-import RPi.GPIO as GPIO
+from guizero import App, PushButton, Window, Text, Box
 import serial
 import time
 import subprocess
+import sys
 
-ser = serial.Serial("/dev/ttyACM0", 9600) #Setting the BAUD Rate and USB Port for the Arduino Connection
-time.sleep(2) #wait for the serial connection to initialize
+# ==========================
+# Serial setup
+# ==========================
+SERIAL_PORT = "/dev/ttyACM0"
+SERIAL_BAUD = 9600
 
-GPIO.setmode(GPIO.BOARD) #Sets the mode to use GPIO physical pin locations 
-GPIO.setwarnings(False) #Stops all GPIO pin warnings
+ser = None
+serial_ok = False
+try:
+    ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+    time.sleep(2)
+    serial_ok = True
+except Exception as e:
+    print(f"[WARN] Serial not available on {SERIAL_PORT}: {e}")
+    serial_ok = False
 
-path = '/home/pi/TouchScreenRelayPanel/' #The path of the pyton program and button photos
+def send(cmd: str) -> None:
+    if not serial_ok or ser is None:
+        return
+    try:
+        ser.write((cmd + "\n").encode("ascii"))
+    except Exception as e:
+        print(f"Serial send failed for {cmd!r}: {e}")
 
-#Initial states of the circuits, used to monitor if they are ON or OFF
+# ==========================
+# Config
+# ==========================
+PIN_CODE = "804601"  # <-- your 6-digit PIN
+
+# ==========================
+# UPFITTER STYLE THEME
+# ==========================
+BG = "#07090c"
+PANEL = "#0b0f14"
+
+TXT = "#f2f4f7"
+TXT_DIM = "#a7b0bb"
+WARN = "#ff3b30"
+
+OFF_RING = "#2b323b"
+ON_RING  = "#00cc44"
+AMBER_RING = "#ffb000"
+LOCK_RING  = "#ff2a2a"
+NEUTRAL_RING = "#5a616b"
+
+RING_THICKNESS = 3
+
+# Make layout hug screen edges
+PAD_X = 0
+PAD_Y = 0
+
+BTN_W = 14
+BTN_H = 3
+
+BTN_FONT = ("DejaVu Sans", 16, "bold")
+STATUS_FONT = ("DejaVu Sans", 12, "bold")
+
+# ==========================
+# Batch refresh (prevents stagger)
+# ==========================
+_BATCH_MODE = False
+_NEEDS_REFRESH = False
+
+def begin_batch():
+    global _BATCH_MODE, _NEEDS_REFRESH
+    _BATCH_MODE = True
+    _NEEDS_REFRESH = False
+
+def end_batch():
+    global _BATCH_MODE, _NEEDS_REFRESH
+    _BATCH_MODE = False
+    if _NEEDS_REFRESH:
+        refresh_all()
+
+def request_refresh():
+    global _NEEDS_REFRESH
+    if _BATCH_MODE:
+        _NEEDS_REFRESH = True
+    else:
+        refresh_all()
+
+# ==========================
+# States
+# ==========================
+Locked_State = 0
+
 Fog_Lights_State = 0
 Light_Bar_State = 0
+Ditch_Lights_State = 0
 Backup_Lights_State = 0
 Truck_Bed_Lights_State = 0
+
 Rock_Lights_State = 0
-Ditch_Lights_State = 0
+Chase_Lights_State = 0
 Air_Compressor_State = 0
 Winch_State = 0
-Chase_Lights_State = 0
-Button_10_State = 0
-Button_11_State = 0
-Button_12_State = 0
-Button_13_State = 0
-Button_14_State = 0
-Button_15_State = 0
+VHF_UHF_Radio_State = 0
+
+HF_Radio_State = 0
+Scanner_State = 0
+Computer_State = 0
+AC_Power_State = 0
+Truck_Bed_12VDC_State = 0
+
 Button_16_State = 0
 Trail_Lights_State = 0
 Recovery_State = 0
-Button_19_State = 0
-Button_20_State = 0
-Night_Trail_State = 0
 
+# NEW group toggles
+Comms_Group_State = 0
+Power_Group_State = 0
 
-def Fog_Lights_Callback(): #Fog Lights Callback, turns ON and OFF the Fog Lights relay
-    global Fog_Lights_State, Fog_Lights
-    if Fog_Lights_State == 0: #If the Fog Lights are OFF and the button is pressed, the Fog Lights turn ON
-        Fog_Lights_State = 1
-        Fog_Lights.image = path + 'Fog_Lights_On.png'
-        ser.write(b'0\n')
-    else: #If the Fog Lights are ON and the button is pressed, the Figh Lights turns OFF
-        Fog_Lights_State = 0
-        Fog_Lights.image = path + 'Fog_Lights_Off.png'
-        ser.write(b'1\n')
+Brightness_State = 100
+Brightness_Auto = True
 
-def Light_Bar_Callback(): #Light Barr Callback, tusn ON and OFF the Light Bar relay
-    global Light_Bar_State, Light_Bar
-    if Light_Bar_State == 0: #If the Light Bar is OFF and the button is pressed, the Light Bar turns ON
-        Light_Bar_State = 1
-        Light_Bar.image = path + 'Light_Bar_On.png'
-        ser.write(b'2\n')
-    else: #If the Light Bar is ON and the button is pressed, the Light Bar turns OFF
-        Light_Bar_State = 0
-        Light_Bar.image = path + 'Light_Bar_Off.png'
-        ser.write(b'3\n')
+# Battery placeholder
+Battery_Voltage = None
 
-def Ditch_Lights_Callback(): #Ditch Light Callback, turns ON and OFF the Ditch Lights relay
-    global Ditch_Lights_State, Ditch_Lights
-    if Ditch_Lights_State == 0: #If the Ditch Lights are OFF and the button is pressed, the Ditch Lights turn ON
-        Ditch_Lights_State = 1
-        Ditch_Lights.image = path + 'Ditch_Lights_On.png'
-        ser.write(b'4\n') 
-    else: #If the Ditch Lights are ON and the button is pressed, the Ditch Lights turn OFF
-        Ditch_Lights_State = 0
-        Ditch_Lights.image = path + 'Ditch_Lights_Off.png'
-        ser.write(b'5\n')
+def battery_text():
+    global Battery_Voltage
+    if Battery_Voltage is None:
+        return "BATT --.-V"
+    try:
+        return f"BATT {float(Battery_Voltage):.1f}V"
+    except Exception:
+        return "BATT --.-V"
 
-def Backup_Lights_Callback(): #Backup Lights Callback, turns ON and OFF the Backup Lights relay
-    global Backup_Lights_State, Backup_Lights
-    if Backup_Lights_State == 0: #If the Backup Lights are OFF and the button is pressed, the Backup Lights turn ON
-        Backup_Lights_State = 1
-        Backup_Lights.image = path + 'Backup_Lights_On.png'
-        ser.write(b'6\n')
-    else: #If the Backup Lights are ON and the button is pressed, the Backup Lights turn OFF
-        Backup_Lights_State = 0
-        Backup_Lights.image = path + 'Backup_Lights_Off.png'
-        ser.write(b'7\n')
-        
-def Truck_Bed_Lights_Callback(): #Truck Bed Lights Callback, turns ON and OFF the Truck Bed Lights relay
-    global Truck_Bed_Lights_State, Truck_Bed_Lights
-    if Truck_Bed_Lights_State == 0: #If the Truck Bed  Lights are OFF and the button is pressed, the Truck Bed Lights turn ON
-        Truck_Bed_Lights_State = 1
-        Truck_Bed_Lights.image = path + 'Truck_Bed_Lights_On.png'
-        ser.write(b'8\n')
-    else: #If the Truck Bed  Lights are ON and the button is pressed, the Truck Bed Lights turn OFF
-        Truck_Bed_Lights_State = 0
-        Truck_Bed_Lights.image = path + 'Truck_Bed_Lights_Off.png'
-        ser.write(b'9\n')
-        
-def Rock_Lights_Callback(): #Rock Lights Callback, turns ON and OFF the Rock Lights relay
-    global Rock_Lights_State, Rock_Lights
-    if Rock_Lights_State == 0: #If the Rock Lights are OFF and the button is pressed, the Rock Lights turn ON
-        Rock_Lights_State = 1
-        Rock_Lights.image = path + 'Rock_Lights_On.png'
-        ser.write(b'A\n')
-    else: #If the Rock Lights are ON and the button is pressed, the Rock Lights turn OFF
-        Rock_Lights_State = 0
-        Rock_Lights.image = path + 'Rock_Lights_Off.png'
-        ser.write(b'B\n')
-        
-def Chase_Lights_Callback(): #Chase Lights Callback, turns ON and OFF the Chase Lights relay
-    global Chase_Lights_State, Chase_Lights
-    if Chase_Lights_State == 0: #If the Chase Lights are OFF and the button is pressed, the Chase Lights turns ON
-        Chase_Lights_State = 1
-        Chase_Lights.image = path + 'Chase_Lights_On.png'
-        ser.write(b'C\n')
-    else: #If the Chase Lights are ON and the button is pressed, the Chase Lights turns OFF
-        Chase_Lights_State = 0
-        Chase_Lights.image = path + 'Chase_Lights_Off.png'
-        ser.write(b'D\n')
+# GUI handles
+app = None
+exit_popup = None
+pin_popup = None
 
-def Air_Compressor_Callback(): #Air Compressor Callback, tusn ON and OFF the Air Compressor relay
-    global Air_Compressor_State, Air_Compressor
-    if Air_Compressor_State == 0: #If the Air Compressor is OFF and the button is pressed, the Air Compressor turns ON
-        Air_Compressor_State = 1
-        Air_Compressor.image = path + 'Air_Compressor_On.png'
-        ser.write(b'E\n')
-    else: #If the Air Compressor is ON and the button is pressed, the Air Compressor turns OFF
-        Air_Compressor_State = 0
-        Air_Compressor.image = path + 'Air_Compressor_Off.png'
-        ser.write(b'F\n')
-        
-def Winch_Callback(): #Winch Callback, turns ON and OFF the Winch relay
-    global Winch_State, Winch
-    if Winch_State == 0: #If the Winch is OFF and the button is pressed, the Winch turns ON
-        Winch_State = 1
-        Winch.image = path + 'Winch_On.png'
-        ser.write(b'G\n')
-    else: #If the Winch is ON and the button is pressed, the Winch turns OFF
-        Winch_State = 0
-        Winch.image = path + 'Winch_Off.png'
-        ser.write(b'H\n')
-        
-def Button_10_Callback(): #Button 10 Callback, turns ON and OFF the Button 10 relay
-    global Button_10_State, Button_10
-    if Button_10_State == 0: #If Button 10 is OFF and the button is pressed, Button 10 turns ON
-        Button_10_State = 1
-        Button_10.image = path + 'Spare_On.png'
-        ser.write(b'I\n')
-    else: #If Button 10 is ON and the button is pressed, Button 10 turns OFF
-        Button_10_State = 0
-        Button_10.image = path + 'Spare_Off.png'
-        ser.write(b'J\n')
-        
-def Button_11_Callback(): #Button 11 Callback, turns ON and OFF the Button 11 relay
-    global Button_11_State, Button_11
-    if Button_11_State == 0: #If Button 11 is OFF and the button is pressed, Button 11 turns ON
-        Button_11_State = 1
-        Button_11.image = path + 'Spare_On.png'
-        ser.write(b'K\n')
-    else: #If Button 11 is ON and the button is pressed, the Button 11 turns OFF
-        Button_11_State = 0
-        Button_11.image = path + 'Spare_Off.png'
-        ser.write(b'L\n')
-        
-def Button_12_Callback(): #Button 12 Callback, turns ON and OFF the Button 12 relay
-    global Button_12_State, Button_12
-    if Button_12_State == 0: #If Button 12 is OFF and the button is pressed, Button 12 turns ON
-        Button_12_State = 1
-        Button_12.image = path + 'Spare_On.png'
-        ser.write(b'M\n')
-    else: #If Button 12 is ON and the button is pressed, the Button 12 turns OFF
-        Button_12_State = 0
-        Button_12.image = path + 'Spare_Off.png'
-        ser.write(b'N\n')
-        
-def Button_13_Callback(): #Button 13 Callback, turns ON and OFF the Button 13 relay
-    global Button_13_State, Button_13
-    if Button_13_State == 0: #If Button 13 is OFF and the button is pressed, Button 13 turns ON
-        Button_13_State = 1
-        Button_13.image = path + 'Spare_On.png'
-        ser.write(b'O\n')
-    else: #If Button 13 is ON and the button is pressed, Button 13 turns OFF
-        Button_13_State = 0
-        Button_13.image = path + 'Spare_Off.png'
-        ser.write(b'P\n')
-        
-def Button_14_Callback(): #Button 14 Callback, turns ON and OFF the Button 14 relay
-    global Button_14_State, Button_14
-    if Button_14_State == 0: #If Button 14 is OFF and the button is pressed, Button 14 turns ON
-        Button_14_State = 1
-        Button_14.image = path + 'Spare_On.png'
-        ser.write(b'Q\n')
-    else: #If Button 14 is ON and the button is pressed, Button 14 turns OFF
-        Button_14_State = 0
-        Button_14.image = path + 'Spare_Off.png'
-        ser.write(b'R\n')
-        
-def Button_15_Callback(): #Button 15 Callback, turns ON and OFF the Button 15 relay
-    global Button_15_State, Button_15
-    if Button_15_State == 0: #If Button 15 is OFF and the button is pressed, Button 15 turns ON
-        Button_15_State = 1
-        Button_15.image = path + 'Spare_On.png'
-        ser.write(b'S\n')
-    else: #If Button 15 is ON and the button is pressed, Button 15 turns OFF
-        Button_15_State = 0
-        Button_15.image = path + 'Spare_Off.png'
-        ser.write(b'T\n')
-        
-def Button_16_Callback(): #Button 16 Callback, turns ON and OFF the Button 16 relay
-    global Button_16_State, Button_16
-    if Button_16_State == 0: #If Button 16 is OFF and the button is pressed, Button 16 turns ON
-        Button_16_State = 1
-        Button_16.image = path + 'Spare_On.png'
-        ser.write(b'U\n')
-    else: #If Button 16 is ON and the button is pressed, Button 16 turns OFF
-        Button_16_State = 0
-        Button_16.image = path + 'Spare_Off.png'
-        ser.write(b'V\n')  
-        
-def Trail_Lights_Callback(): #Trail Lights Button, turns ON and OFF Trail Lights: Fog Lights, Light Bar, Ditch Lights, Rock Lights, and Chase Lights
-    global Trail_Lights_State, Trail_Lights
-    if Trail_Lights_State == 0: #If the Trail Lights Button is OFF and pressed, do this
-        Trail_Lights_State = 1 #Turn ON the Trail Lights Button
-        Trail_Lights.image = path + 'Trail_Lights_On.png' #Change the button image to ON
-        if Fog_Lights_State == 1: #If the Fog Lights Button is already ON and the Trail Lights Button is pressed, keep it ON and turn ON the rest of the buttons
-            if Light_Bar_State == 1:
-                if Ditch_Lights_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            else:
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Light_Bar_State == 1: #If the Light Bar Button is already ON and the Trail Lights Button is pressed, keep it ON and turn ON the rest of the buttons
-            if Fog_Lights_State == 1:
-                if Ditch_Lights_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 1:
-                if Fog_Lights_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 1:
-                if Fog_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 1: 
-                if Fog_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Ditch_Lights_State == 1: #If the Ditch Lights Button is already ON and the Trail Lights Button is pressed, keep it ON and turn ON the rest of the buttons
-            if Light_Bar_State == 1:
-                if Fog_Lights_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Fog_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Fog_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 1: 
-                if Light_Bar_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Fog_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            else:
-                Light_Bar_Callback()
-                Fog_Lights_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Rock_Lights_State == 1: #If the Rock Lights Button is already ON and the Trail Lights Button is pressed, keep it ON and turn ON the rest of the buttons
-            if Light_Bar_State == 1:
-                if Ditch_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Fog_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Fog_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 1: 
-                if Light_Bar_State == 1:
-                    Ditch_Lights_Callback()
-                    Fog_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Fog_Lights_Lights_Callback()
-                elif Fog_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Fog_Lights_Callback()
-            else:
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Fog_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Chase_Lights_State == 1: #If the Chase Lights Button is already ON and the Trail Lights Button is pressed, keep it ON and turn ON the rest of the buttons
-            if Fog_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            elif Light_Bar_State == 1:
-                if Fog_Lights_State == 1:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            elif Ditch_Lights_State == 1:
-                if Light_Bar_State == 1:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Fog_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-            elif Rock_Lights_State == 1:
-                if Fog_Lights_State == 1:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                elif Light_Bar_State == 1:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                elif Ditch_Lights_State == 1:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-        else: #If none of the Buttons are ON and the Trail Lights Button is pressed, turn them ALL ON
-            Fog_Lights_Callback()
-            Light_Bar_Callback()
-            Ditch_Lights_Callback()
-            Rock_Lights_Callback()
-            Chase_Lights_Callback()
-    else: #If the Trail Lights Button is already ON and pressed, do this
-        Trail_Lights_State = 0
-        Trail_Lights.image = path + 'Trail_Lights_Off.png'
-        if Fog_Lights_State == 0: #If the Fog Lights Button is already OFF and the Trail Lights button is pressed, keep it OFF and turn OFF the rest of the buttons
-            if Light_Bar_State == 0:
-                if Ditch_Lights_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 0:
-                if Light_Bar_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 0:
-                if Light_Bar_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 0:
-                if Light_Bar_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            else:
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Light_Bar_State == 0: #If the Light Bar Button is already OFF and the Trail Lights button is pressed, keep it OFF and turn OFF the rest of the buttons
-            if Fog_Lights_State == 0:
-                if Ditch_Lights_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                else: 
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Chase_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Ditch_Lights_State == 0: #If the Ditch Lights Button is already OFF and the Trail Lights button is pressed, keep it OFF and turn OFF the rest of the buttons
-            if Fog_Lights_State == 0:
-                if Light_Bar_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Light_Bar_State == 0:
-                if Fog_Lights_State == 0:
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Rock_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Light_Bar_State == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Light_Bar_Callback()
-                Rock_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Rock_Lights_State == 0: #If the Rock Lights Button is already OFF and the Trail Lights button is pressed, keep it OFF and turn OFF the rest of the buttons
-            if Fog_Lights_State == 0:
-                if Light_Bar_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_Callback == 0:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Light_Bar_State == 0:
-                if Fog_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Chase_Lights_Callback()
-            elif Ditch_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-                elif Light_Bar_Callback == 0:
-                    Fog_Lights_Callback()
-                    Chase_Lights_Callback()
-                elif Chase_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                    Chase_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Chase_Lights_Callback()
-        elif Chase_Lights_State == 0: #If the Chase Lights Button is already OFF and the Trail Lights button is pressed, keep it OFF and turn OFF the rest of the buttons
-            if Fog_Lights_State == 0:
-                if Light_Bar_State==0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            elif Light_Bar_State == 0:
-                if Fog_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-            elif Ditch_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-                elif Light_Bar_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Rock_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                    Rock_Lights_Callback()
-            elif Rock_Lights_State == 0:
-                if Fog_Lights_State == 0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Light_Bar_State==0:
-                    Ditch_Lights_Callback()
-                    Rock_Lights_Callback()
-                elif Ditch_Lights_State == 0:
-                    Fog_Lights_Callback()
-                    Rock_Lights_Callback()
-                else:
-                    Fog_Lights_Callback()
-                    Light_Bar_Callback()
-                    Ditch_Lights_Callback()
-            else:
-                Fog_Lights_Callback()
-                Light_Bar_Callback()
-                Ditch_Lights_Callback()
-                Rock_Lights_Callback()
-        else: #If none of the Buttons are OFF and the Trail Lights Button is pressed, turn them ALL OFF
-            Fog_Lights_Callback()
-            Light_Bar_Callback()
-            Ditch_Lights_Callback()
-            Rock_Lights_Callback()
-            Chase_Lights_Callback()
-        
-def Recovery_Callback(): #Recovery Button, turns ON and OFF the Trail Lights, and the Air Compressor and Winch
-    global Recovery_State, Recovery, Night_Trail_State
-    if Recovery_State == 0:
-        Recovery_State = 1
-        Recovery.image = path + 'Recovery_On.png'
+# Status text widgets
+status_top_left = None
+status_top_mid = None
+status_top_right = None
+status_bot_left = None
+status_bot_mid = None
+status_bot_right = None
+
+# Buttons
+buttons = {}
+lockable_buttons = []
+brightness_buttons = {}
+
+# ==========================
+# Styling
+# ==========================
+def _set_ring(btn, ring_color):
+    try:
+        btn.bg = PANEL
+        btn.text_color = TXT
+        btn.tk.configure(
+            bd=0,
+            relief="flat",
+            highlightthickness=RING_THICKNESS,
+            highlightbackground=ring_color,
+            highlightcolor=ring_color,
+            activebackground=PANEL,
+            activeforeground=TXT,
+            font=BTN_FONT,
+            padx=10,
+            pady=8,
+        )
+        btn.tk.grid_configure(padx=PAD_X, pady=PAD_Y, sticky="nsew")
+    except Exception:
+        pass
+
+def style_main_button(key, is_on):
+    _set_ring(buttons[key], ON_RING if is_on else OFF_RING)
+
+def style_neutral_button(key):
+    _set_ring(buttons[key], NEUTRAL_RING)
+
+status_top_mid = None
+status_bot_mid = None
+
+# ==========================
+# Status bar
+# ==========================
+def update_status_bar():
+    lock_txt = "LOCKED" if Locked_State else "UNLOCKED"
+    ser_txt  = "MCU OK" if serial_ok else "MCU OFFLINE"
+
+    now = time.strftime("%H:%M:%S")
+    today = time.strftime("%a %b %d")
+
+    status_top_left.value = f"{lock_txt} | {ser_txt}"
+    status_top_mid.value = ""
+    status_top_right.value = f"{today} | {now}"
+
+    if Recovery_State == 1:
+        mode_txt = "MODE: RECOVERY"
+        mode_color = AMBER_RING
+    elif Trail_Lights_State == 1:
+        mode_txt = "MODE: TRAIL"
+        mode_color = ON_RING
+    else:
+        mode_txt = "MODE: NONE"
+        mode_color = TXT_DIM
+
+    status_bot_left.value = mode_txt
+    status_bot_mid.value = battery_text()
+
+    mode = "AUTO" if Brightness_Auto else "MAN"
+    status_bot_right.value = f"BRIGHT {Brightness_State}% {mode}"
+
+    try:
+        status_bot_left.tk.configure(fg=mode_color)
+    except Exception:
+        pass
+
+# ==========================
+# Brightness
+# ==========================
+def _run_backlight(pct: int):
+    try:
+        subprocess.run(["sudo", "rpi-backlight", "--set-brightness", str(int(pct))], check=False)
+    except Exception as e:
+        print(f"Brightness set failed: {e}")
+
+def set_brightness(pct: int):
+    global Brightness_State, Brightness_Auto
+    Brightness_Auto = False
+    try:
+        pct = int(pct)
+    except Exception:
+        pct = 100
+    pct = max(0, min(100, pct))
+    Brightness_State = pct
+    _run_backlight(Brightness_State)
+    request_refresh()
+
+def set_brightness_auto():
+    global Brightness_Auto
+    Brightness_Auto = True
+    _run_backlight(Brightness_State)
+    request_refresh()
+
+def refresh_brightness_buttons():
+    for name, btn in brightness_buttons.items():
+        if name == "AUTO":
+            ring = AMBER_RING if Brightness_Auto else OFF_RING
+        else:
+            active = (not Brightness_Auto) and (Brightness_State == name)
+            ring = ON_RING if active else OFF_RING
+        _set_ring(btn, ring)
+
+# ==========================
+# Lock
+# ==========================
+def _set_locked(locked: bool):
+    global Locked_State
+    Locked_State = 1 if locked else 0
+    for b in lockable_buttons:
+        try:
+            b.enabled = not locked
+        except Exception:
+            pass
+    request_refresh()
+
+# ==========================
+# Exit popup
+# ==========================
+def _do_exit():
+    global exit_popup, app
+    try:
+        if exit_popup is not None:
+            try:
+                exit_popup.tk.grab_release()
+            except Exception:
+                pass
+            exit_popup.destroy()
+            exit_popup = None
+    except Exception:
+        pass
+
+    try:
+        if ser is not None:
+            ser.close()
+    except Exception:
+        pass
+
+    try:
+        if app is not None:
+            app.destroy()
+    except Exception:
+        pass
+
+    sys.exit(0)
+
+def _show_exit_confirmation():
+    global exit_popup, app
+
+    try:
+        if exit_popup is not None:
+            exit_popup.show()
+            exit_popup.tk.attributes("-topmost", True)
+            exit_popup.tk.attributes("-topmost", False)
+            return
+    except Exception:
+        exit_popup = None
+
+    exit_popup = Window(app, title="EXIT", width=800, height=480)
+    exit_popup.bg = BG
+    exit_popup.tk.attributes("-fullscreen", True)
+    exit_popup.tk.config(cursor="none")
+    exit_popup.tk.attributes("-topmost", True)
+    exit_popup.tk.grab_set()
+
+    def _hide_exit():
+        try:
+            exit_popup.tk.grab_release()
+        except Exception:
+            pass
+        exit_popup.hide()
+
+    outer = Box(exit_popup, layout="grid", width="fill", height="fill")
+    outer.bg = BG
+    outer.tk.grid_rowconfigure(0, weight=1)
+    outer.tk.grid_rowconfigure(2, weight=1)
+    outer.tk.grid_columnconfigure(0, weight=1)
+    outer.tk.grid_columnconfigure(2, weight=1)
+
+    center = Box(outer, layout="grid", grid=[1, 1])
+    center.bg = BG
+
+    msg = Text(center, text="EXIT CONTROL PANEL?", color=TXT, size=30, grid=[0, 0, 2, 1])
+    msg.bg = BG
+
+    yes_btn = PushButton(center, text="YES", grid=[0, 1], width=10, height=2, command=_do_exit)
+    no_btn  = PushButton(center, text="NO",  grid=[1, 1], width=10, height=2, command=_hide_exit)
+    yes_btn.text_color = TXT
+    no_btn.text_color  = TXT
+    yes_btn.bg = "#444b55"
+    no_btn.bg  = "#2a2f36"
+
+    try:
+        yes_btn.tk.grid_configure(padx=12, pady=12, sticky="e")
+        no_btn.tk.grid_configure(padx=12, pady=12, sticky="w")
+    except Exception:
+        pass
+
+    exit_popup.when_closed = _hide_exit
+
+# ==========================
+# PIN keypad
+# ==========================
+def _show_pin_unlock():
+    global pin_popup, app
+
+    try:
+        if pin_popup is not None:
+            pin_popup.show()
+            pin_popup.tk.attributes("-topmost", True)
+            pin_popup.tk.attributes("-topmost", False)
+            return
+    except Exception:
+        pin_popup = None
+
+    pin_popup = Window(app, title="PIN", width=800, height=480)
+    pin_popup.bg = BG
+    pin_popup.tk.attributes("-fullscreen", True)
+    pin_popup.tk.config(cursor="none")
+    pin_popup.tk.attributes("-topmost", True)
+    pin_popup.tk.grab_set()
+
+    entered = {"v": ""}
+
+    def _render(display):
+        n = len(entered["v"])
+        dots = ["●" if i < n else "○" for i in range(6)]
+        display.value = " ".join(dots)
+
+    def reset_pin(display, status):
+        entered["v"] = ""
+        status.value = ""
+        _render(display)
+
+    def _hide_pin(display, status):
+        try:
+            pin_popup.tk.grab_release()
+        except Exception:
+            pass
+        reset_pin(display, status)
+        pin_popup.hide()
+
+    outer = Box(pin_popup, layout="grid", width="fill", height="fill")
+    outer.bg = BG
+    outer.tk.grid_rowconfigure(0, weight=1)
+    outer.tk.grid_rowconfigure(2, weight=1)
+    outer.tk.grid_columnconfigure(0, weight=1)
+    outer.tk.grid_columnconfigure(2, weight=1)
+
+    center = Box(outer, layout="grid", grid=[1, 1])
+    center.bg = BG
+
+    title = Text(center, text="ENTER 6-DIGIT PIN", color=TXT, size=26, grid=[0, 0, 3, 1])
+    title.bg = BG
+    display = Text(center, text="○ ○ ○ ○ ○ ○", color=TXT, size=30, grid=[0, 1, 3, 1])
+    display.bg = BG
+    status = Text(center, text="", color=WARN, size=16, grid=[0, 2, 3, 1])
+    status.bg = BG
+
+    def add_digit(d):
+        if len(entered["v"]) < 6:
+            entered["v"] += str(d)
+            status.value = ""
+            _render(display)
+
+    def back():
+        entered["v"] = entered["v"][:-1]
+        _render(display)
+
+    def clear():
+        entered["v"] = ""
+        _render(display)
+
+    def enter():
+        if entered["v"] == PIN_CODE:
+            _hide_pin(display, status)
+            _set_locked(False)
+        else:
+            status.value = "INCORRECT PIN"
+            entered["v"] = ""
+            _render(display)
+
+    keypad = Box(center, layout="grid", grid=[0, 3, 3, 1])
+    keypad.bg = BG
+    try:
+        keypad.tk.grid_columnconfigure(0, weight=1, uniform="k")
+        keypad.tk.grid_columnconfigure(1, weight=1, uniform="k")
+        keypad.tk.grid_columnconfigure(2, weight=1, uniform="k")
+    except Exception:
+        pass
+
+    def mk_key(txt, gx, gy, cmd, bg="#2a2f36"):
+        b = PushButton(keypad, text=txt, grid=[gx, gy], command=cmd, width=6, height=2)
+        b.text_color = TXT
+        b.bg = bg
+        try:
+            b.tk.grid_configure(padx=2, pady=2, sticky="nsew")
+        except Exception:
+            pass
+        return b
+
+    mk_key("1", 0, 0, lambda: add_digit(1))
+    mk_key("2", 1, 0, lambda: add_digit(2))
+    mk_key("3", 2, 0, lambda: add_digit(3))
+    mk_key("4", 0, 1, lambda: add_digit(4))
+    mk_key("5", 1, 1, lambda: add_digit(5))
+    mk_key("6", 2, 1, lambda: add_digit(6))
+    mk_key("7", 0, 2, lambda: add_digit(7))
+    mk_key("8", 1, 2, lambda: add_digit(8))
+    mk_key("9", 2, 2, lambda: add_digit(9))
+    mk_key("CLR", 0, 3, clear, bg="#444b55")
+    mk_key("0",   1, 3, lambda: add_digit(0))
+    mk_key("⌫",   2, 3, back, bg="#444b55")
+
+    actions = Box(center, layout="grid", grid=[0, 4, 3, 1])
+    actions.bg = BG
+    try:
+        actions.tk.grid_columnconfigure(0, weight=1)
+        actions.tk.grid_columnconfigure(1, weight=1)
+    except Exception:
+        pass
+
+    cancel_btn = PushButton(actions, text="CANCEL", grid=[0, 0], command=lambda: _hide_pin(display, status),
+                            width=10, height=2)
+    enter_btn  = PushButton(actions, text="ENTER",  grid=[1, 0], command=enter, width=10, height=2)
+    cancel_btn.text_color = TXT
+    cancel_btn.bg = "#444b55"
+    enter_btn.text_color = TXT
+    enter_btn.bg = "#1f6bff"
+
+    try:
+        cancel_btn.tk.grid_configure(padx=10, pady=10, sticky="e")
+        enter_btn.tk.grid_configure(padx=10, pady=10, sticky="w")
+    except Exception:
+        pass
+
+    pin_popup.when_closed = lambda: _hide_pin(display, status)
+    reset_pin(display, status)
+
+def Lock_Callback():
+    if Locked_State == 0:
+        _set_locked(True)
+    else:
+        _show_pin_unlock()
+
+# ==========================
+# Setters
+# ==========================
+def Fog_Lights_Set(on: bool):
+    global Fog_Lights_State
+    if on and Fog_Lights_State == 0:
+        Fog_Lights_State = 1; send("0")
+    elif (not on) and Fog_Lights_State == 1:
+        Fog_Lights_State = 0; send("1")
+    request_refresh()
+
+def Light_Bar_Set(on: bool):
+    global Light_Bar_State
+    if on and Light_Bar_State == 0:
+        Light_Bar_State = 1; send("2")
+    elif (not on) and Light_Bar_State == 1:
+        Light_Bar_State = 0; send("3")
+    request_refresh()
+
+def Ditch_Lights_Set(on: bool):
+    global Ditch_Lights_State
+    if on and Ditch_Lights_State == 0:
+        Ditch_Lights_State = 1; send("4")
+    elif (not on) and Ditch_Lights_State == 1:
+        Ditch_Lights_State = 0; send("5")
+    request_refresh()
+
+def Backup_Lights_Set(on: bool):
+    global Backup_Lights_State
+    if on and Backup_Lights_State == 0:
+        Backup_Lights_State = 1; send("6")
+    elif (not on) and Backup_Lights_State == 1:
+        Backup_Lights_State = 0; send("7")
+    request_refresh()
+
+def Truck_Bed_Lights_Set(on: bool):
+    global Truck_Bed_Lights_State
+    if on and Truck_Bed_Lights_State == 0:
+        Truck_Bed_Lights_State = 1; send("8")
+    elif (not on) and Truck_Bed_Lights_State == 1:
+        Truck_Bed_Lights_State = 0; send("9")
+    request_refresh()
+
+def Rock_Lights_Set(on: bool):
+    global Rock_Lights_State
+    if on and Rock_Lights_State == 0:
+        Rock_Lights_State = 1; send("A")
+    elif (not on) and Rock_Lights_State == 1:
+        Rock_Lights_State = 0; send("B")
+    request_refresh()
+
+def Chase_Lights_Set(on: bool):
+    global Chase_Lights_State
+    if on and Chase_Lights_State == 0:
+        Chase_Lights_State = 1; send("C")
+    elif (not on) and Chase_Lights_State == 1:
+        Chase_Lights_State = 0; send("D")
+    request_refresh()
+
+def Air_Compressor_Set(on: bool):
+    global Air_Compressor_State
+    if on and Air_Compressor_State == 0:
+        Air_Compressor_State = 1; send("E")
+    elif (not on) and Air_Compressor_State == 1:
+        Air_Compressor_State = 0; send("F")
+    request_refresh()
+
+def Winch_Set(on: bool):
+    global Winch_State
+    if on and Winch_State == 0:
+        Winch_State = 1; send("G")
+    elif (not on) and Winch_State == 1:
+        Winch_State = 0; send("H")
+    request_refresh()
+
+def VHF_UHF_Radio_Set(on: bool):
+    global VHF_UHF_Radio_State
+    if on and VHF_UHF_Radio_State == 0:
+        VHF_UHF_Radio_State = 1; send("I")
+    elif (not on) and VHF_UHF_Radio_State == 1:
+        VHF_UHF_Radio_State = 0; send("J")
+    request_refresh()
+
+def HF_Radio_Set(on: bool):
+    global HF_Radio_State
+    if on and HF_Radio_State == 0:
+        HF_Radio_State = 1; send("K")
+    elif (not on) and HF_Radio_State == 1:
+        HF_Radio_State = 0; send("L")
+    request_refresh()
+
+def Scanner_Set(on: bool):
+    global Scanner_State
+    if on and Scanner_State == 0:
+        Scanner_State = 1; send("M")
+    elif (not on) and Scanner_State == 1:
+        Scanner_State = 0; send("N")
+    request_refresh()
+
+def Computer_Set(on: bool):
+    global Computer_State
+    if on and Computer_State == 0:
+        Computer_State = 1; send("O")
+    elif (not on) and Computer_State == 1:
+        Computer_State = 0; send("P")
+    request_refresh()
+
+def AC_Power_Set(on: bool):
+    global AC_Power_State
+    if on and AC_Power_State == 0:
+        AC_Power_State = 1; send("Q")
+    elif (not on) and AC_Power_State == 1:
+        AC_Power_State = 0; send("R")
+    request_refresh()
+
+def Truck_Bed_12VDC_Set(on: bool):
+    global Truck_Bed_12VDC_State
+    if on and Truck_Bed_12VDC_State == 0:
+        Truck_Bed_12VDC_State = 1; send("S")
+    elif (not on) and Truck_Bed_12VDC_State == 1:
+        Truck_Bed_12VDC_State = 0; send("T")
+    request_refresh()
+
+def Button_16_Set(on: bool):
+    global Button_16_State
+    if on and Button_16_State == 0:
+        Button_16_State = 1; send("U")
+    elif (not on) and Button_16_State == 1:
+        Button_16_State = 0; send("V")
+    request_refresh()
+
+# ==========================
+# modes + NEW group toggles
+# ==========================
+def apply_modes():
+    begin_batch()
+    try:
+        if Recovery_State == 1:
+            Fog_Lights_Set(True); Light_Bar_Set(True); Ditch_Lights_Set(True)
+            Backup_Lights_Set(True); Truck_Bed_Lights_Set(True)
+            Rock_Lights_Set(True); Chase_Lights_Set(True)
+            Air_Compressor_Set(True); Winch_Set(True)
+            return
+
         if Trail_Lights_State == 1:
-            if Backup_Lights_State == 1:
-                if Truck_Bed_Lights_State == 1:
-                    if Air_Compressor_State == 1: 
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Air_Compressor_State == 1:
-                    if Truck_Bed_Lights_State ==1:
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Winch_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    elif Air_Compressor_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                else:
-                    Truck_Bed_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 1
-            elif Truck_Bed_Lights_State == 1:
-                if Backup_Lights_State == 1:
-                    if Air_Compressor_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Air_Compressor_State == 1:
-                    if Backup_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Winch_State == 1:
-                    if Backup_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    elif Air_Compressor_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                else:
-                    Backup_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 1
-            elif Air_Compressor_State == 1:
-                if Backup_Lights_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Truck_Bed_Lights_State == 1:
-                    if Backup_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                    elif Winch_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 1
-                elif Winch_State == 1:
-                    if Backup_Lights_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                    elif Truck_Bed_Lights_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                else:
-                    Backup_Lights_Callback()
-                    Truck_Bed_Lights_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 1
-            elif Winch_State == 1:
-                if Backup_Lights_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    elif Air_Compressor_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                elif Truck_Bed_Lights_State == 1:
-                    if Backup_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                    elif Air_Compressor_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 1
-                elif Air_Compressor_State == 1:
-                    if Backup_Lights_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State =1
-                    elif Truck_Bed_Lights_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 1
-                    else:
-                        Backup_Lights_Callback()
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 1
-                else:
-                    Backup_Lights_Callback()
-                    Truck_Bed_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Night_Trail_State = 1
-            else:
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 1
-        elif Backup_Lights_State == 1:
-            if Trail_Lights_State == 1:
-                if Truck_Bed_Lights_State == 1:
-                    if Air_Compressor_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Truck_Bed_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Truck_Bed_Lights_State == 1:
-                if Trail_Lights_State == 1:
-                    if Air_Compressor_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Trail_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Trail_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Air_Compressor_State == 1:
-                if Trail_Lights_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Truck_Bed_Lights_State == 1:
-                    if Trail_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Trail_Lights_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    elif Truck_Bed_Lights_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Truck_Bed_Lights_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Winch_State == 1:
-                if Trail_Lights_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                elif Truck_Bed_Lights_State == 1:
-                    if Trail_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    elif Truck_Bed_Lights_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Truck_Bed_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Night_Trail_State = 0
-            else:
-                Trail_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-        elif Truck_Bed_Lights_State == 1:
-            if Trail_Lights_State == 1:
-                if Truck_Bed_Lights_State == 1:
-                    if Air_Compressor_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Truck_Bed_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Truck_Bed_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Truck_Bed_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Truck_Bed_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Backup_Lights_State == 1:
-                if Trail_Lights_State == 1:
-                    if Air_Compressor_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Air_Compressor_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Trail_Lights_State == 1:
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Trail_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Air_Compressor_State == 1:
-                if Trail_Lights_State == 1:
-                    if Backup_Lights_State == 1:
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Night_Trail_State = 0
-                    else:
-                        Backup_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Backup_Lights_State == 1:
-                    if Trail_Lights_State == 1:
-                        Night_Trail_State = 0
-                    elif Winch_State == 1:
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Winch_Callback()
-                        Night_Trail_State = 0
-                elif Winch_State == 1:
-                    if Trail_Lights_State == 1:
-                        Night_Trail_State = 0
-                    elif Backup_Lights_State == 1:
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Backup_Lights_Callback()
-                    Winch_Callback()
-                    Night_Trail_State = 0
-            elif Winch_State == 1:
-                if Trail_Lights_State == 1:
-                    if Backup_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Backup_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                elif Backup_Lights_State == 1:
-                    if Trail_Lights_State == 1:
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                    elif Air_Compressor_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Air_Compressor_Callback()
-                        Night_Trail_State = 0
-                elif Air_Compressor_State == 1:
-                    if Trail_Lights_State == 1:
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 0
-                    elif Backup_Lights_On == 1:
-                        Trail_Lights_Callback()
-                        Night_Trail_State = 0
-                    else:
-                        Trail_Lights_Callback()
-                        Backup_Lights_Callback()
-                        Night_Trail_State = 0
-                else:
-                    Trail_Lights_Callback()
-                    Backup_Lights_Callback()
-                    Air_Compressor_Callback()
-                    Night_Trail_State = 0
-            else:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-        elif Air_Compressor_State == 1:
-            if Trail_Lights_State == 1:
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-            elif Backup_Lights_State == 1:
-                Trail_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-            elif Truck_Bed_Lights_State == 1:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-            elif Winch_State == 1:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Night_Trail_State = 0
-            else:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-                Night_Trail_State = 0
-        elif Winch_State == 1:
-            if Trail_Lights_State == 1:
-                Truck_Bed_Lights_Callback()
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Night_Trail_State = 0
-            elif Backup_Lights_State == 1:
-                Trail_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Night_Trail_State = 0
-            elif Truck_Bed_Lights_State == 1:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Night_Trail_State = 0
-            elif Air_Compressor_State == 1:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Night_Trail_State = 0
-            else:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Night_Trail_State = 0
-        else:
-            Trail_Lights_Callback()
-            Backup_Lights_Callback()
-            Truck_Bed_Lights_Callback()
-            Air_Compressor_Callback()
-            Winch_Callback()
-            Night_Trail_State = 0
+            Fog_Lights_Set(True); Light_Bar_Set(True); Ditch_Lights_Set(True)
+            Rock_Lights_Set(True); Chase_Lights_Set(True)
+            Backup_Lights_Set(False); Truck_Bed_Lights_Set(False)
+            Air_Compressor_Set(False); Winch_Set(False)
+            return
+
+        Fog_Lights_Set(False); Light_Bar_Set(False); Ditch_Lights_Set(False)
+        Rock_Lights_Set(False); Chase_Lights_Set(False)
+        Backup_Lights_Set(False); Truck_Bed_Lights_Set(False)
+        Air_Compressor_Set(False); Winch_Set(False)
+    finally:
+        end_batch()
+
+def Comms_Group_Toggle():
+    global Comms_Group_State
+    if Locked_State == 1:
+        return
+
+    Comms_Group_State ^= 1
+    begin_batch()
+    try:
+        VHF_UHF_Radio_Set(bool(Comms_Group_State))
+        HF_Radio_Set(bool(Comms_Group_State))
+        Scanner_Set(bool(Comms_Group_State))
+        Computer_Set(bool(Comms_Group_State))
+    finally:
+        end_batch()
+    request_refresh()
+
+def Power_Group_Toggle():
+    global Power_Group_State
+    if Locked_State == 1:
+        return
+
+    Power_Group_State ^= 1
+    begin_batch()
+    try:
+        AC_Power_Set(bool(Power_Group_State))
+        Truck_Bed_12VDC_Set(bool(Power_Group_State))
+    finally:
+        end_batch()
+    request_refresh()
+
+# ==========================
+# Callbacks (guarded)
+# ==========================
+def _if_unlocked(fn):
+    def wrapper():
+        if Locked_State == 1:
+            return
+        fn()
+    return wrapper
+
+def Trail_Lights_Callback():
+    global Trail_Lights_State
+    if Locked_State == 1:
+        return
+    Trail_Lights_State ^= 1
+    apply_modes()
+    request_refresh()
+
+def Recovery_Callback():
+    global Recovery_State
+    if Locked_State == 1:
+        return
+    Recovery_State ^= 1
+    apply_modes()
+    request_refresh()
+
+# ==========================
+# Build GUI
+# ==========================
+app = App(title="CONTROL PANEL", width=800, height=480, layout="grid")
+app.bg = BG
+
+# IMPORTANT: Make main grid columns equal width (prevents top-row widgets from resizing columns)
+for c in range(5):
+    try:
+        app.tk.grid_columnconfigure(c, weight=1)
+    except Exception:
+        pass
+
+try:
+    app.tk.grid_rowconfigure(0, weight=0)  # top bar
+    app.tk.grid_rowconfigure(1, weight=1)
+    app.tk.grid_rowconfigure(2, weight=1)
+    app.tk.grid_rowconfigure(3, weight=1)
+    app.tk.grid_rowconfigure(4, weight=1)
+    app.tk.grid_rowconfigure(5, weight=0)  # brightness
+except Exception:
+    pass
+
+def make_btn(label, r, c, cb, lockable=True):
+    b = PushButton(app, text=label, grid=[c, r], command=cb, width=BTN_W, height=BTN_H)
+    b.text_color = TXT
+    b.bg = PANEL
+    buttons[label] = b
+    if lockable:
+        lockable_buttons.append(b)
+    return b
+
+# ==========================
+# TOP BAR (LOCK/EXIT fixed pixel width, status fills)
+# ==========================
+TOP_FIXED_W = 130  # pixels
+TOP_FIXED_H = 90   # pixels
+
+topbar = Box(app, layout="grid", grid=[0, 0, 5, 1], width="fill", height=TOP_FIXED_H)
+topbar.bg = BG
+
+try:
+    # lock topbar height
+    topbar.tk.grid_propagate(False)
+    topbar.tk.grid_configure(sticky="nsew", padx=0, pady=0)
+    app.tk.grid_rowconfigure(0, minsize=TOP_FIXED_H, weight=0)
+
+    # 3-column topbar: LOCK | STATUS | EXIT
+    topbar.tk.grid_columnconfigure(0, minsize=TOP_FIXED_W, weight=0)
+    topbar.tk.grid_columnconfigure(1, weight=1)
+    topbar.tk.grid_columnconfigure(2, minsize=TOP_FIXED_W, weight=0)
+
+    topbar.tk.grid_rowconfigure(0, weight=1)
+except Exception:
+    pass
+
+# ---- LOCK (fixed column width) ----
+lock_top = PushButton(topbar, text="LOCK", grid=[0, 0], command=Lock_Callback)
+lock_top.text_color = TXT
+lock_top.bg = PANEL
+buttons["LOCK"] = lock_top
+try:
+    lock_top.tk.grid_configure(sticky="nsew")
+except Exception:
+    pass
+
+# ---- STATUS (fills) ----
+status_bar = Box(topbar, layout="grid", grid=[1, 0], width="fill", height=TOP_FIXED_H)
+status_bar.bg = BG
+try:
+    status_bar.tk.grid_configure(sticky="nsew", padx=0, pady=0)
+
+    # give left more room than mid/right
+    status_bar.tk.grid_columnconfigure(0, weight=6)
+    status_bar.tk.grid_columnconfigure(1, weight=0)
+    status_bar.tk.grid_columnconfigure(2, weight=4)
+
+    status_bar.tk.grid_rowconfigure(0, weight=1)
+    status_bar.tk.grid_rowconfigure(1, weight=1)
+except Exception:
+    pass
+
+status_top_left  = Text(status_bar, text="", grid=[0, 0], color=TXT, size=14)
+status_top_mid   = Text(status_bar, text="", grid=[1, 0], color=TXT_DIM, size=14)
+status_top_right = Text(status_bar, text="", grid=[2, 0], color=TXT_DIM, size=14)
+
+status_bot_left  = Text(status_bar, text="", grid=[0, 1], color=TXT_DIM, size=12)
+status_bot_mid   = Text(status_bar, text="", grid=[1, 1], color=TXT_DIM, size=12)
+status_bot_right = Text(status_bar, text="", grid=[2, 1], color=TXT_DIM, size=12)
+
+for t in (status_top_left, status_top_mid, status_top_right,
+          status_bot_left, status_bot_mid, status_bot_right):
+    t.bg = BG
+    try:
+        t.tk.configure(font=STATUS_FONT)
+    except Exception:
+        pass
+
+try:
+    status_top_left.tk.configure(anchor="w")
+    status_bot_left.tk.configure(anchor="w")
+    status_top_mid.tk.configure(anchor="center")
+    status_bot_mid.tk.configure(anchor="center")
+    status_top_right.tk.configure(anchor="e")
+    status_bot_right.tk.configure(anchor="e")
+except Exception:
+    pass
+
+EDGE_PAD = 12
+try:
+    status_top_left.tk.grid_configure(sticky="ew", padx=(EDGE_PAD, 0), pady=(6, 0))
+    status_top_mid.tk.grid_configure(sticky="ew", pady=(6, 0))
+    status_top_right.tk.grid_configure(sticky="ew", padx=(0, EDGE_PAD), pady=(6, 0))
+
+    status_bot_left.tk.grid_configure(sticky="ew", padx=(EDGE_PAD, 0), pady=(0, 6))
+    status_bot_mid.tk.grid_configure(sticky="ew", pady=(0, 6))
+    status_bot_right.tk.grid_configure(sticky="ew", padx=(0, EDGE_PAD), pady=(0, 6))
+except Exception:
+    pass
+
+# ---- EXIT (fixed column width) ----
+exit_top = PushButton(topbar, text="EXIT", grid=[2, 0], command=_show_exit_confirmation)
+exit_top.text_color = TXT
+exit_top.bg = PANEL
+buttons["EXIT"] = exit_top
+try:
+    exit_top.tk.grid_configure(sticky="nsew")
+except Exception:
+    pass
+
+# ---- MAIN GRID rows 1-4 ----
+make_btn("FOG\nLIGHTS",        1, 0, _if_unlocked(lambda: Fog_Lights_Set(not bool(Fog_Lights_State))))
+make_btn("LIGHT\nBAR",         1, 1, _if_unlocked(lambda: Light_Bar_Set(not bool(Light_Bar_State))))
+make_btn("DITCH\nLIGHTS",      1, 2, _if_unlocked(lambda: Ditch_Lights_Set(not bool(Ditch_Lights_State))))
+make_btn("BACKUP\nLIGHTS",     1, 3, _if_unlocked(lambda: Backup_Lights_Set(not bool(Backup_Lights_State))))
+make_btn("BED\nLIGHTS",        1, 4, _if_unlocked(lambda: Truck_Bed_Lights_Set(not bool(Truck_Bed_Lights_State))))
+
+make_btn("ROCK\nLIGHTS",       2, 0, _if_unlocked(lambda: Rock_Lights_Set(not bool(Rock_Lights_State))))
+make_btn("CHASE\nLIGHTS",      2, 1, _if_unlocked(lambda: Chase_Lights_Set(not bool(Chase_Lights_State))))
+make_btn("AIR\nCOMP",          2, 2, _if_unlocked(lambda: Air_Compressor_Set(not bool(Air_Compressor_State))))
+make_btn("WINCH",              2, 3, _if_unlocked(lambda: Winch_Set(not bool(Winch_State))))
+make_btn("VHF/UHF\nRADIO",     2, 4, _if_unlocked(lambda: VHF_UHF_Radio_Set(not bool(VHF_UHF_Radio_State))))
+
+make_btn("HF\nRADIO",          3, 0, _if_unlocked(lambda: HF_Radio_Set(not bool(HF_Radio_State))))
+make_btn("SCANNER",            3, 1, _if_unlocked(lambda: Scanner_Set(not bool(Scanner_State))))
+make_btn("PC\nACCS",           3, 2, _if_unlocked(lambda: Computer_Set(not bool(Computer_State))))
+make_btn("120VAC\nPOWER",      3, 3, _if_unlocked(lambda: AC_Power_Set(not bool(AC_Power_State))))
+make_btn("12VDC\nPOWER",       3, 4, _if_unlocked(lambda: Truck_Bed_12VDC_Set(not bool(Truck_Bed_12VDC_State))))
+
+make_btn("SPARE",              4, 0, _if_unlocked(lambda: Button_16_Set(not bool(Button_16_State))))
+make_btn("TRAIL\nLIGHTS",      4, 1, Trail_Lights_Callback)
+make_btn("TRAIL\nRECOVERY",    4, 2, Recovery_Callback)
+
+# group buttons
+make_btn("COMMS",              4, 3, Comms_Group_Toggle, lockable=True)
+make_btn("POWER",              4, 4, Power_Group_Toggle, lockable=True)
+
+# ---- BRIGHTNESS ROW ----
+def make_bright(name, col, cb):
+    b = PushButton(app, text=str(name), grid=[col, 5], command=cb, width=BTN_W, height=2)
+    b.text_color = TXT
+    b.bg = PANEL
+    try:
+        b.tk.grid_configure(padx=PAD_X, pady=PAD_Y, sticky="nsew")
+    except Exception:
+        pass
+    return b
+
+brightness_buttons[25]     = make_bright("25%", 0, lambda: set_brightness(25))
+brightness_buttons[50]     = make_bright("50%", 1, lambda: set_brightness(50))
+brightness_buttons[75]     = make_bright("75%", 2, lambda: set_brightness(75))
+brightness_buttons[100]    = make_bright("100%", 3, lambda: set_brightness(100))
+brightness_buttons["AUTO"] = make_bright("AUTO", 4, set_brightness_auto)
+
+# ==========================
+# Refresh
+# ==========================
+def refresh_all():
+    style_main_button("FOG\nLIGHTS", Fog_Lights_State)
+    style_main_button("LIGHT\nBAR", Light_Bar_State)
+    style_main_button("DITCH\nLIGHTS", Ditch_Lights_State)
+    style_main_button("BACKUP\nLIGHTS", Backup_Lights_State)
+    style_main_button("BED\nLIGHTS", Truck_Bed_Lights_State)
+
+    style_main_button("ROCK\nLIGHTS", Rock_Lights_State)
+    style_main_button("CHASE\nLIGHTS", Chase_Lights_State)
+    style_main_button("AIR\nCOMP", Air_Compressor_State)
+    style_main_button("WINCH", Winch_State)
+    style_main_button("VHF/UHF\nRADIO", VHF_UHF_Radio_State)
+
+    style_main_button("HF\nRADIO", HF_Radio_State)
+    style_main_button("SCANNER", Scanner_State)
+    style_main_button("PC\nACCS", Computer_State)
+    style_main_button("120VAC\nPOWER", AC_Power_State)
+    style_main_button("12VDC\nPOWER", Truck_Bed_12VDC_State)
+
+    style_main_button("SPARE", Button_16_State)
+    style_main_button("TRAIL\nLIGHTS", Trail_Lights_State)
+    style_main_button("TRAIL\nRECOVERY", Recovery_State)
+
+    style_main_button("COMMS", Comms_Group_State)
+    style_main_button("POWER", Power_Group_State)
+
+    # Lock/Exit (top bar)
+    if Locked_State == 1:
+        _set_ring(buttons["LOCK"], LOCK_RING)
     else:
-        Recovery_State = 0
-        Recovery.image = path + 'Recovery_Off.png'
-        if Night_Trail_State == 1:
-            if Backup_Lights_State == 0:
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-            elif Truck_Bed_Lights_State == 0:
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-            elif Air_Compressor_State == 0:
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Winch_Callback()
-            elif Winch_State == 0:
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-            else:
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-        else:
-            if Trail_Lights_State == 0:
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-            elif Backup_Lights_State == 0:
-                Trail_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-            elif Truck_Bed_Lights_State == 0:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
-            elif Air_Compressor_State == 0:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Winch_Callback()
-            elif Winch_State == 0:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-            else:
-                Trail_Lights_Callback()
-                Backup_Lights_Callback()
-                Truck_Bed_Lights_Callback()
-                Air_Compressor_Callback()
-                Winch_Callback()
+        _set_ring(buttons["LOCK"], OFF_RING)
+    _set_ring(buttons["EXIT"], NEUTRAL_RING)
 
-def Button_19_Callback(): #Extra Multi Action Button
-    global Button_19_State, Button_19
-    if Button_19_State == 0:
-        Button_19_State = 1
-        Button_19.image = path + 'Spare_On.png'
-    else:
-        Button_19_State = 0
-        Button_19.image = path + 'Spare_Off.png'
-        
-def Button_20_Callback(): #Extra Multi Action Button
-    global Button_20_State, Button_20
-    if Button_20_State == 0:
-        Button_20_State = 1
-        Button_20.image = path + 'Spare_On.png'
-    else:
-        Button_20_State = 0
-        Button_20.image = path + 'Spare_Off.png'
-             
-def screen_brightness(value):
-    global slider
-    value = slider.value
-    subprocess.run(["sudo", "rpi-backlight", "--set-brightness", str(value)])
+    refresh_brightness_buttons()
+    update_status_bar()
 
-app = App(title="Keypad example", width=800, height=480, layout="grid")
-app.bg='black'
-Fog_Lights = PushButton(app, command=Fog_Lights_Callback, grid=[0,0], align='left', image = path + 'Fog_Lights_Off.png')
-Light_Bar = PushButton(app, command=Light_Bar_Callback, grid=[1,0], align='left',image = path + 'Light_Bar_Off.png')
-Ditch_Lights  = PushButton(app, command=Ditch_Lights_Callback, grid=[2,0], align='left',image = path + 'Ditch_Lights_Off.png')
-Backup_Lights  = PushButton(app, command=Backup_Lights_Callback, grid=[3,0], align='left',image = path + 'Backup_Lights_Off.png')
-Truck_Bed_Lights  = PushButton(app, command=Truck_Bed_Lights_Callback, grid=[4,0], align='left',image = path + 'Truck_Bed_Lights_Off.png')
-Rock_Lights  = PushButton(app, command=Rock_Lights_Callback, grid=[0,1], align='left',image = path + 'Rock_Lights_Off.png')
-Chase_Lights  = PushButton(app, command=Chase_Lights_Callback, grid=[1,1], align='left',image = path + 'Chase_Lights_Off.png')
-Air_Compressor  = PushButton(app, command=Air_Compressor_Callback, grid=[2,1], align='left',image = path + 'Air_Compressor_Off.png')
-Winch  = PushButton(app, command=Winch_Callback, grid=[3,1], align='left',image = path + 'Winch_Off.png')
-Button_10  = PushButton(app, command=Button_10_Callback, grid=[4,1], align='left',image = path + 'Spare_Off.png')
-Button_11  = PushButton(app, command=Button_11_Callback, grid=[0,2], align='left',image = path + 'Spare_Off.png')
-Button_12  = PushButton(app, command=Button_12_Callback, grid=[1,2], align='left',image = path + 'Spare_Off.png')
-Button_13  = PushButton(app, command=Button_13_Callback, grid=[2,2], align='left',image = path + 'Spare_Off.png')
-Button_14  = PushButton(app, command=Button_14_Callback, grid=[3,2], align='left',image = path + 'Spare_Off.png')
-Button_15  = PushButton(app, command=Button_15_Callback, grid=[4,2], align='left',image = path + 'Spare_Off.png')
-Button_16  = PushButton(app, command=Button_16_Callback, grid=[0,3], align='left',image = path + 'Spare_Off.png')
-Trail_Lights  = PushButton(app, command=Trail_Lights_Callback, grid=[1,3], align='left',image = path + 'Trail_Lights_Off.png')
-Recovery  = PushButton(app, command=Recovery_Callback, grid=[2,3], align='left',image = path + 'Recovery_Off.png')
-Button_19  = PushButton(app, command=Button_19_Callback, grid=[3,3], align='left',image = path + 'Spare_Off.png')
-Button_20  = PushButton(app, command=Button_20_Callback, grid=[4,3], align='left',image = path + 'Spare_Off.png')
-
-slider = Slider(app, command=screen_brightness, grid=[0,5,5,4], align='left', start=0, end=100)
-slider.value='100'
-slider.resize(800, 480)
-slider.text_color='white'
-slider.bg='black'
-
+# ==========================
+# Boot
+# ==========================
 def main():
-    app.tk.attributes("-fullscreen",True)
-    app.tk.config(cursor='none')
+    app.tk.attributes("-fullscreen", True)
+    app.tk.config(cursor="none")
+
+    set_brightness_auto()
+    refresh_all()
+
+    def tick():
+        update_status_bar()
+
+    app.repeat(1000, tick)
     app.display()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
